@@ -1,0 +1,73 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<mule xmlns:salesforce="http://www.mulesoft.org/schema/mule/salesforce" xmlns:os="http://www.mulesoft.org/schema/mule/os"
+	xmlns:ee="http://www.mulesoft.org/schema/mule/ee/core"
+	xmlns:snowflake="http://www.mulesoft.org/schema/mule/snowflake" xmlns:http="http://www.mulesoft.org/schema/mule/http" xmlns="http://www.mulesoft.org/schema/mule/core" xmlns:doc="http://www.mulesoft.org/schema/mule/documentation" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://www.mulesoft.org/schema/mule/core http://www.mulesoft.org/schema/mule/core/current/mule.xsd
+http://www.mulesoft.org/schema/mule/http http://www.mulesoft.org/schema/mule/http/current/mule-http.xsd
+http://www.mulesoft.org/schema/mule/snowflake http://www.mulesoft.org/schema/mule/snowflake/current/mule-snowflake.xsd
+http://www.mulesoft.org/schema/mule/ee/core http://www.mulesoft.org/schema/mule/ee/core/current/mule-ee.xsd
+http://www.mulesoft.org/schema/mule/os http://www.mulesoft.org/schema/mule/os/current/mule-os.xsd
+http://www.mulesoft.org/schema/mule/salesforce http://www.mulesoft.org/schema/mule/salesforce/current/mule-salesforce.xsd">
+	<snowflake:snowflake-config name="Snowflake_Config" doc:name="Snowflake Config" doc:id="6eeba005-4ad8-4bc0-90a5-eb8717ecb842" >
+		<snowflake:snowflake-connection accountName="WVCMPRL-DC80415" warehouse="COMPUTE_WH" database="HOSPITAL_DB" schema="HOSPITAL_SCHEMA" user="VISWA" password="94415518K65a0369@" role="ACCOUNTADMIN" />
+	</snowflake:snowflake-config>
+	<http:listener-config name="HTTP_Listener_config" doc:name="HTTP Listener config" doc:id="992940f0-62cc-4a99-812c-f947d841cf6e" >
+		<http:listener-connection host="0.0.0.0" port="8081" />
+	</http:listener-config>
+	<os:object-store name="Object_store" doc:name="Object store" doc:id="4d69222d-01e4-427c-8f34-0e81f5301510" maxEntries="1000" entryTtl="600000" config-ref="ObjectStore_Config"/>
+	<os:config name="ObjectStore_Config" doc:name="ObjectStore Config" doc:id="af5b45ac-6900-4c47-be61-68d07901bc33" >
+		<os:connection >
+			<reconnection >
+				<reconnect />
+			</reconnection>
+		</os:connection>
+	</os:config>
+	<flow name="hospital_projectFlow" doc:id="b2d04059-3937-4de0-abf4-b31f89e08dc5" >
+		<http:listener doc:name="Listener" doc:id="c9875807-270e-4bd7-b280-d3a40268396d" config-ref="HTTP_Listener_config" path="/pincode"/>
+		<set-variable value="#[attributes.queryParams.pincode as String]" doc:name="pincode_vars" doc:id="5d0e4168-b10e-4d63-944d-918b22d2af89" variableName="pincode"/>
+		<os:retrieve doc:name="Retrieve" doc:id="686e10db-c3c8-4198-b7fa-16915907cd41" key="#[vars.pincode]" objectStore="Object_store" target="cachedhospitals">
+			<os:default-value ><![CDATA[#[[]]]]></os:default-value>
+		</os:retrieve>
+		<choice doc:name="Choice" doc:id="7d2f05a6-0478-4c10-a2f2-13de2b834395" >
+			<when expression="#[!isEmpty(vars.cachedhospitals)]">
+				<logger level="INFO" doc:name="Logger" doc:id="3b495382-5c02-4ac2-9e0b-3137d519ea0c" message='#["Serving from cache"]'/>
+				<set-payload value="#[vars.cachedhospitals]" doc:name="Set Payload" doc:id="7267a1e9-4284-4ad4-b31e-44924b810fdb" />
+			</when>
+			<otherwise >
+				<snowflake:select doc:name="Select" doc:id="e5fa5bdd-c79e-4c5c-a63b-5b4352e64ca6" config-ref="Snowflake_Config" transactionalAction="NOT_SUPPORTED" target="db_result">
+			<snowflake:sql><![CDATA[SELECT hospital_id, name, address, contact, pincode
+FROM hospital_db.hospital_schema.hospitals
+WHERE pincode = :pincode;
+]]></snowflake:sql>
+			<snowflake:input-parameters><![CDATA[#[{
+	pincode : vars.pincode as Number
+}]]]></snowflake:input-parameters>
+		</snowflake:select>
+				<os:store doc:name="Store" doc:id="98be0e6c-27c4-46c4-ba3e-6c7c4a2af6b6" key="#[vars.pincode]">
+					<os:value ><![CDATA[#[vars.db_result]]]></os:value>
+				</os:store>
+				<logger level="INFO" doc:name="Logger" doc:id="112aa3bf-62a0-444b-9041-bad2e56f6462" message="#[vars.db_result]"/>
+			</otherwise>
+		</choice>
+		<logger level="INFO" doc:name="Logger" doc:id="623f4b90-b439-4d4a-a0e9-edd08450770d" message="#[payload]"/>
+		<ee:transform doc:name="Transform Message" doc:id="39f99c09-bde9-4769-8208-c425d99a2ae7" >
+			<ee:message >
+				<ee:set-payload ><![CDATA[%dw 2.0
+output application/json
+---
+payload map (item) -> {
+    hospital_id: item.hospital_id as String,
+    name: item.name,
+    address: item.address,
+    contact: item.contact as String,
+    pincode: item.pincode as Number
+}
+]]></ee:set-payload>
+			</ee:message>
+		</ee:transform>
+		<salesforce:create doc:name="Create" doc:id="ca19e8ee-4b2a-4262-bb45-8ba6d7179685" />
+		<salesforce:query-all doc:name="Query all" doc:id="b7c592eb-3f51-4673-add2-faf6f27e2567" >
+			<salesforce:salesforce-query ><![CDATA[chrom]]></salesforce:salesforce-query>
+		</salesforce:query-all>
+	</flow>
+</mule>
